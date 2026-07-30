@@ -1,0 +1,42 @@
+workflows:
+  android-release:
+    name: Android Release Build
+    max_build_duration: 120
+    environment:
+      android_signing:
+        - keystore_reference
+      vars:
+        PACKAGE_NAME: "com.wanderercover.controller"
+        GRADLE_FLAGS: "-w"
+      flutter: stable
+    triggering:
+      events:
+        - push
+      branch:
+        include:
+          - main
+    scripts:
+      - name: Set up local.properties
+        script: |
+          echo "flutter.sdk=$HOME/sdks/flutter" > android/local.properties
+      
+      - name: Get Flutter packages
+        script: |
+          flutter packages pub get
+      
+      - name: Build APK
+        script: |
+          flutter build apk \
+            --release \
+            --build-name=1.0.0 \
+            --build-number=1
+    
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+    publishing:
+      email:
+        recipients:
+          - user@example.com
+        notify:
+          success: true
+          failure: false
