@@ -12,25 +12,22 @@ workflows:
     triggering:
       events:
         - push
-      branch:
-        include:
-          - main
     scripts:
       - name: Set up local.properties
         script: |
           echo "flutter.sdk=$HOME/sdks/flutter" > android/local.properties
-      
+
       - name: Get Flutter packages
         script: |
           flutter packages pub get
-      
+
       - name: Build APK
         script: |
           flutter build apk \
             --release \
             --build-name=1.0.0 \
             --build-number=1
-    
+
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
     publishing:
