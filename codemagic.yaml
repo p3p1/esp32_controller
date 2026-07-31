@@ -1,37 +1,43 @@
 workflows:
   android-release:
     name: Android Release Build
-    max_build_duration: 120
+    max_build_duration: 60
     environment:
-      vars:
-        PACKAGE_NAME: "com.wanderercover.controller"
-        GRADLE_FLAGS: "-w"
       flutter: stable
-    triggering:
-      events:
-        - push
     scripts:
-      - name: Set up local.properties
+      - name: Generate Android scaffolding
         script: |
-          echo "flutter.sdk=$HOME/sdks/flutter" > android/local.properties
+          # Backup del main.dart, flutter create rigenera la struttura mancante
+          cp lib/main.dart /tmp/main.dart.bak
+          flutter create . --project-name wanderercover_controller --platforms android
+          cp /tmp/main.dart.bak lib/main.dart
+
+      - name: Add BLE and Internet permissions
+        script: |
+          python3 << 'PYEOF'
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path) as f:
+              content = f.read()
+          perms = """    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
+          """
+          content = content.replace("<application", perms + "<application", 1)
+          with open(path, "w") as f:
+              f.write(content)
+          print("Permessi aggiunti al manifest")
+          PYEOF
 
       - name: Get Flutter packages
         script: |
-          flutter packages pub get
+          flutter pub get
 
       - name: Build APK
         script: |
-          flutter build apk \
-            --release \
-            --build-name=1.0.0 \
-            --build-number=1
+          flutter build apk --release
 
     artifacts:
       - build/app/outputs/flutter-apk/app-release.apk
-    publishing:
-      email:
-        recipients:
-          - user@example.com
-        notify:
-          success: true
-          failure: false
