@@ -1,7 +1,7 @@
 name: wanderercover_controller
-description: WandererCover BLE + WiFi Controller with Timer
+description: WandererCover Controller v5
 publish_to: 'none'
-version: 2.0.0+1
+version: 5.0.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
