@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -11,14 +10,10 @@ const kServiceUUID        = "12345678-1234-1234-1234-123456789abc";
 const kCharacteristicUUID = "87654321-4321-4321-4321-cba987654321";
 const kDeviceName         = "WandererCover";
 const kPrefDeviceId       = 'ble_device_id';
-const kPrefEspIp          = 'esp_ip';
 
-// Le 3 configurazioni custom (corrispondono ai preset 1-2-3 di WandererEmpire)
 class LightConfig {
   final int index;
-  final String name;
-  final String brightness;
-  final String heater;
+  final String name, brightness, heater;
   final Color color;
   const LightConfig(this.index, this.name, this.brightness, this.heater, this.color);
 }
@@ -54,10 +49,12 @@ class WandererApp extends StatelessWidget {
 class BleManager {
   final connected        = ValueNotifier<bool>(false);
   final autoReconnecting = ValueNotifier<bool>(false);
-  final status           = ValueNotifier<String>("");
+  final status           = ValueNotifier<String>("Disconnesso");
   final busy             = ValueNotifier<bool>(false);
   final coverOpen        = ValueNotifier<bool>(false);
   final configIndex      = ValueNotifier<int>(0);
+  final phase            = ValueNotifier<String>("");   // "arming" | "stepping" | ""
+  final stepInfo         = ValueNotifier<String>("");   // es. "2/3"
 
   BluetoothDevice?         _device;
   BluetoothCharacteristic? _char;
@@ -162,7 +159,7 @@ class BleManager {
           connected.value = false; busy.value = false;
           _char = null; _device = null;
           if (!_userDisconnected) { status.value = "Persa — riprovo..."; _scheduleReconnect(); }
-          else status.value = "";
+          else status.value = "Disconnesso";
         }
       });
       connected.value = true;
@@ -176,15 +173,20 @@ class BleManager {
   void _onNotif(List<int> val) {
     final msg = utf8.decode(val);
     if (msg.startsWith("BUSY:")) busy.value = true;
-    else if (msg == "READY") busy.value = false;
+    else if (msg == "READY") { busy.value = false; phase.value = ""; stepInfo.value = ""; }
+    else if (msg == "ARMING") { phase.value = "arming"; }
+    else if (msg.startsWith("STEPPING:")) { phase.value = "stepping"; stepInfo.value = msg.substring(9); }
     else if (msg == "COVER:open") coverOpen.value = true;
     else if (msg == "COVER:closed") coverOpen.value = false;
     else if (msg.startsWith("CONFIG_INDEX:")) configIndex.value = int.tryParse(msg.substring(13)) ?? 0;
-    else if (msg.startsWith("ERROR:")) { busy.value = false; status.value = "Errore: ${msg.substring(6)}"; }
+    else if (msg.startsWith("ERROR:")) { busy.value = false; phase.value = ""; status.value = "Errore: ${msg.substring(6)}"; }
   }
 
   Future<bool> send(String cmd) async {
-    if (!connected.value || _char == null || busy.value) return false;
+    if (!connected.value || _char == null) return false;
+    // I comandi non-taglio (timer/reset/gap) passano anche se busy
+    final immediate = cmd.startsWith("TIMER_") || cmd == "RESET_STATE" || cmd.startsWith("SET_GAP:");
+    if (busy.value && !immediate) return false;
     try {
       await _char!.write(utf8.encode(cmd), withoutResponse: false);
       return true;
@@ -196,7 +198,7 @@ class BleManager {
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
     _device?.disconnect();
     connected.value = false; autoReconnecting.value = false; busy.value = false;
-    status.value = ""; _char = null; _device = null;
+    status.value = "Disconnesso"; _char = null; _device = null;
   }
 
   Future<void> forget() async {
@@ -222,32 +224,12 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _tab = 0;
   final _ble = BleManager();
-  final transport = ValueNotifier<String>("none");
-  final status    = ValueNotifier<String>("Disconnesso");
-  final busy      = ValueNotifier<bool>(false);
-  final coverOpen = ValueNotifier<bool>(false);
-  final configIdx = ValueNotifier<int>(0);
-  String _espIp = "";
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _init();
-    _ble.status.addListener(() { if (_ble.status.value.isNotEmpty) status.value = _ble.status.value; });
-    _ble.busy.addListener(() { if (transport.value == "ble") busy.value = _ble.busy.value; });
-    _ble.connected.addListener(() {
-      if (_ble.connected.value) { transport.value = "ble"; status.value = "BLE connesso ✓"; }
-      else if (transport.value == "ble") transport.value = "none";
-    });
-    _ble.coverOpen.addListener(() => coverOpen.value = _ble.coverOpen.value);
-    _ble.configIndex.addListener(() => configIdx.value = _ble.configIndex.value);
-  }
-
-  Future<void> _init() async {
-    final p = await SharedPreferences.getInstance();
-    setState(() => _espIp = p.getString(kPrefEspIp) ?? '');
-    await _ble.init();
+    _ble.init();
   }
 
   @override
@@ -262,81 +244,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  Future<bool> _wifiConnect(String ip) async {
-    status.value = "Test WiFi...";
-    try {
-      final r = await http.get(Uri.parse('http://$ip/status')).timeout(const Duration(seconds: 5));
-      if (r.statusCode == 200) {
-        final d = jsonDecode(r.body);
-        _espIp = ip;
-        final p = await SharedPreferences.getInstance();
-        await p.setString(kPrefEspIp, ip);
-        transport.value = "wifi";
-        status.value = "WiFi connesso ✓ ($ip)";
-        coverOpen.value = d['cover_open'] ?? false;
-        configIdx.value = d['config_index'] ?? 0;
-        return true;
-      }
-    } catch (_) {}
-    status.value = "ESP32 non raggiungibile su $ip";
-    return false;
-  }
-
-  Future<void> sendCommand(String cmd) async {
-    if (busy.value) return;
-    if (transport.value == "ble") { await _ble.send(cmd); }
-    else if (transport.value == "wifi") {
-      busy.value = true;
-      try {
-        String url;
-        if (cmd == "COVER_TOGGLE") url = 'http://$_espIp/cover_toggle';
-        else if (cmd == "CONFIG_NEXT") url = 'http://$_espIp/config_next';
-        else if (cmd.startsWith("CONFIG_SET:")) url = 'http://$_espIp/config_set?level=${cmd.substring(11)}';
-        else if (cmd == "RESET_STATE") url = 'http://$_espIp/reset_state';
-        else if (cmd.startsWith("TIMER_START:")) url = 'http://$_espIp/timer_start?ms=${cmd.substring(12)}';
-        else if (cmd == "TIMER_CANCEL") url = 'http://$_espIp/timer_cancel';
-        else { busy.value = false; return; }
-        await http.get(Uri.parse(url)).timeout(const Duration(seconds: 120));
-        await _pollStatus();
-        status.value = "Pronto ✓";
-      } catch (e) { status.value = "Errore WiFi: $e"; }
-      busy.value = false;
-    }
-  }
-
-  Future<void> _pollStatus() async {
-    try {
-      final r = await http.get(Uri.parse('http://$_espIp/status')).timeout(const Duration(seconds: 5));
-      if (r.statusCode == 200) {
-        final d = jsonDecode(r.body);
-        coverOpen.value = d['cover_open'] ?? false;
-        configIdx.value = d['config_index'] ?? 0;
-      }
-    } catch (_) {}
-  }
-
-  void _disconnect() {
-    if (transport.value == "ble") _ble.disconnect();
-    transport.value = "none"; busy.value = false; status.value = "Disconnesso";
-  }
-
-  bool get _isConnected => _ble.connected.value || transport.value == "wifi";
-
   @override
   Widget build(BuildContext context) {
     final tabs = [
-      ControlTab(
-        connected: _ble.connected, wifiConnected: transport,
-        busy: busy, status: status, autoReconnecting: _ble.autoReconnecting,
-        coverOpen: coverOpen, configIdx: configIdx, espIp: _espIp,
-        onManualScan: _ble.manualScan, onWifiConnect: _wifiConnect,
-        onCommand: sendCommand, onDisconnect: _disconnect, onForget: _ble.forget,
-      ),
-      TimerTab(
-        isConnectedFn: () => _isConnected,
-        busy: busy, configIdx: configIdx,
-        onCommand: sendCommand,
-      ),
+      ControlTab(ble: _ble),
+      TimerTab(ble: _ble),
     ];
     return Scaffold(
       body: tabs[_tab],
@@ -355,45 +267,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// TAB 1 — Controllo (cover + 3 config)
+// TAB 1 — Controllo
 // ══════════════════════════════════════════════════════════════════════════════
-class ControlTab extends StatefulWidget {
-  final ValueNotifier<bool> connected, busy, autoReconnecting, coverOpen;
-  final ValueNotifier<String> wifiConnected, status;
-  final ValueNotifier<int> configIdx;
-  final String espIp;
-  final VoidCallback onManualScan, onDisconnect;
-  final Future<void> Function() onForget;
-  final Future<bool> Function(String) onWifiConnect;
-  final Future<void> Function(String) onCommand;
-  const ControlTab({super.key,
-    required this.connected, required this.busy, required this.autoReconnecting,
-    required this.coverOpen, required this.wifiConnected, required this.status,
-    required this.configIdx, required this.espIp, required this.onManualScan,
-    required this.onDisconnect, required this.onForget, required this.onWifiConnect,
-    required this.onCommand});
-  @override State<ControlTab> createState() => _ControlTabState();
-}
-
-class _ControlTabState extends State<ControlTab> {
-  final _ipCtrl = TextEditingController();
-  @override
-  void initState() { super.initState(); _ipCtrl.text = widget.espIp; }
-
-  bool get _isConn => widget.connected.value || widget.wifiConnected.value == "wifi";
+class ControlTab extends StatelessWidget {
+  final BleManager ble;
+  const ControlTab({super.key, required this.ble});
 
   @override
   Widget build(BuildContext context) => SafeArea(
     child: SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: AnimatedBuilder(
-        animation: Listenable.merge([widget.connected, widget.wifiConnected]),
+        animation: ble.connected,
         builder: (_, __) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _header(),
+          _header(context),
           const SizedBox(height: 16),
           _statusCard(),
           const SizedBox(height: 20),
-          if (_isConn) ...[
+          if (ble.connected.value) ...[
             _coverCard(),
             const SizedBox(height: 20),
             _configSection(),
@@ -401,7 +292,7 @@ class _ControlTabState extends State<ControlTab> {
             _resetButton(),
             const SizedBox(height: 12),
             Center(child: TextButton.icon(
-              onPressed: widget.onDisconnect,
+              onPressed: ble.disconnect,
               icon: const Icon(Icons.bluetooth_disabled, size: 16),
               label: const Text("Disconnetti"),
               style: TextButton.styleFrom(foregroundColor: Colors.white24))),
@@ -412,23 +303,21 @@ class _ControlTabState extends State<ControlTab> {
     ),
   );
 
-  Widget _header() => Row(children: [
+  Widget _header(BuildContext context) => Row(children: [
     const Text("🔭", style: TextStyle(fontSize: 28)),
     const SizedBox(width: 10),
     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text("WandererCover",
         style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
       AnimatedBuilder(
-        animation: Listenable.merge([widget.wifiConnected, widget.autoReconnecting]),
+        animation: Listenable.merge([ble.connected, ble.autoReconnecting]),
         builder: (_, __) {
-          final t = widget.wifiConnected.value;
-          String s = widget.autoReconnecting.value ? "🔄 Ricerca automatica..."
-              : widget.connected.value ? "📶 Bluetooth"
-              : t == "wifi" ? "📡 WiFi" : "Non connesso";
+          String s = ble.autoReconnecting.value ? "🔄 Ricerca automatica..."
+              : ble.connected.value ? "📶 Bluetooth" : "Non connesso";
           return Text(s, style: const TextStyle(color: Colors.white38, fontSize: 12));
         }),
     ])),
-    if (widget.connected.value)
+    if (ble.connected.value)
       IconButton(
         onPressed: () async {
           final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
@@ -442,18 +331,23 @@ class _ControlTabState extends State<ControlTab> {
                 child: const Text("Dimentica", style: TextStyle(color: Color(0xFFFF6B6B)))),
             ],
           ));
-          if (ok == true) await widget.onForget();
+          if (ok == true) await ble.forget();
         },
         icon: const Icon(Icons.link_off, size: 20, color: Colors.white24)),
   ]);
 
   Widget _statusCard() => AnimatedBuilder(
-    animation: Listenable.merge([widget.status, widget.busy, widget.autoReconnecting]),
+    animation: Listenable.merge([ble.status, ble.busy, ble.autoReconnecting, ble.connected, ble.phase, ble.stepInfo]),
     builder: (_, __) {
-      final isBusy = widget.busy.value;
-      final isAuto = widget.autoReconnecting.value;
-      final color = _isConn ? (isBusy ? const Color(0xFFFFD700) : const Color(0xFF4CAF50))
+      final isBusy = ble.busy.value;
+      final isAuto = ble.autoReconnecting.value;
+      final conn = ble.connected.value;
+      final color = conn ? (isBusy ? const Color(0xFFFFD700) : const Color(0xFF4CAF50))
           : isAuto ? const Color(0xFF7B68EE) : Colors.white38;
+      // Messaggio dinamico in base alla fase
+      String msg = ble.status.value;
+      if (ble.phase.value == "arming") msg = "⏳ Attendo standby (13-15s)...";
+      else if (ble.phase.value == "stepping") msg = "🔄 Cambio config — step ${ble.stepInfo.value}";
       return Container(
         width: double.infinity, padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(color: const Color(0xFF1A1A2E),
@@ -462,9 +356,9 @@ class _ControlTabState extends State<ControlTab> {
           if (isAuto) const SizedBox(width: 10, height: 10,
             child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF7B68EE)))
           else Container(width: 10, height: 10, decoration: BoxDecoration(shape: BoxShape.circle, color: color,
-            boxShadow: _isConn ? [BoxShadow(color: color.withOpacity(0.5), blurRadius: 6)] : [])),
+            boxShadow: conn ? [BoxShadow(color: color.withOpacity(0.5), blurRadius: 6)] : [])),
           const SizedBox(width: 10),
-          Expanded(child: Text(widget.status.value, style: TextStyle(color: color, fontSize: 14))),
+          Expanded(child: Text(msg, style: TextStyle(color: color, fontSize: 14))),
           if (isBusy) const SizedBox(width: 18, height: 18,
             child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFFFD700))),
         ]),
@@ -472,21 +366,19 @@ class _ControlTabState extends State<ControlTab> {
     },
   );
 
-  // ── Cover card con toggle ──────────────────────────────────────────────────
   Widget _coverCard() => AnimatedBuilder(
-    animation: Listenable.merge([widget.coverOpen, widget.busy]),
+    animation: Listenable.merge([ble.coverOpen, ble.busy]),
     builder: (_, __) {
-      final open = widget.coverOpen.value;
+      final open = ble.coverOpen.value;
       return GestureDetector(
-        onTap: widget.busy.value ? null : () => widget.onCommand("COVER_TOGGLE"),
+        onTap: ble.busy.value ? null : () => ble.send("COVER_TOGGLE"),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           width: double.infinity, padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             color: open ? const Color(0xFF7B68EE).withOpacity(0.12) : const Color(0xFF1A1A2E),
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: open ? const Color(0xFF7B68EE) : Colors.white12,
-              width: open ? 2 : 1)),
+            border: Border.all(color: open ? const Color(0xFF7B68EE) : Colors.white12, width: open ? 2 : 1)),
           child: Column(children: [
             Icon(open ? Icons.flip_to_front : Icons.flip_to_back,
               size: 48, color: open ? const Color(0xFF7B68EE) : Colors.white38),
@@ -503,21 +395,20 @@ class _ControlTabState extends State<ControlTab> {
     },
   );
 
-  // ── Sezione 3 config ───────────────────────────────────────────────────────
   Widget _configSection() => AnimatedBuilder(
-    animation: Listenable.merge([widget.configIdx, widget.busy]),
+    animation: Listenable.merge([ble.configIndex, ble.busy]),
     builder: (_, __) {
-      final cur = widget.configIdx.value;
+      final cur = ble.configIndex.value;
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text("CONFIGURAZIONE LUCE", style: TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 1.2)),
         const SizedBox(height: 12),
         ...kConfigs.map((c) {
           final isCur = c.index == cur;
-          final enabled = _isConn && !widget.busy.value && !isCur;
+          final enabled = !ble.busy.value && !isCur;
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: GestureDetector(
-              onTap: enabled ? () => widget.onCommand("CONFIG_SET:${c.index}") : null,
+              onTap: enabled ? () => ble.send("CONFIG_SET:${c.index}") : null,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
@@ -528,15 +419,13 @@ class _ControlTabState extends State<ControlTab> {
                 child: Row(children: [
                   Container(width: 44, height: 44,
                     decoration: BoxDecoration(color: c.color.withOpacity(0.2), shape: BoxShape.circle),
-                    child: Icon(c.index == 0 ? Icons.power_settings_new : Icons.wb_sunny,
-                      color: c.color, size: 22)),
+                    child: Icon(c.index == 0 ? Icons.power_settings_new : Icons.wb_sunny, color: c.color, size: 22)),
                   const SizedBox(width: 16),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text(c.name, style: TextStyle(color: isCur ? c.color : Colors.white,
                       fontSize: 16, fontWeight: FontWeight.w600)),
                     const SizedBox(height: 2),
-                    Text(c.index == 0 ? "Luce spenta"
-                        : "Luminosità ${c.brightness} · Heater ${c.heater}",
+                    Text(c.index == 0 ? "Luce spenta" : "Luminosità ${c.brightness} · Heater ${c.heater}",
                       style: const TextStyle(color: Colors.white38, fontSize: 12)),
                   ])),
                   if (isCur) Icon(Icons.check_circle, color: c.color, size: 22)
@@ -547,88 +436,77 @@ class _ControlTabState extends State<ControlTab> {
           );
         }),
         const SizedBox(height: 4),
+        // Pulsante Spegni — visibile solo se la luce è accesa
+        if (cur > 0) ...[
+          SizedBox(width: double.infinity, height: 46,
+            child: ElevatedButton.icon(
+              onPressed: ble.busy.value ? null : () => ble.send("CONFIG_SET:0"),
+              icon: const Icon(Icons.power_settings_new, size: 18),
+              label: const Text("Spegni luce"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF442233),
+                foregroundColor: const Color(0xFFFF6B6B),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+            )),
+          const SizedBox(height: 12),
+        ],
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(color: const Color(0xFF1A1A2E), borderRadius: BorderRadius.circular(10)),
           child: const Text(
-            "💡 Le config sono i preset 1-2-3 salvati in WandererEmpire. Ogni cambio è un taglio da 1.3s; l'app calcola quanti step servono.",
+            "💡 Le config sono i preset 1-2-3 salvati in WandererEmpire. Ogni cambio è un taglio da 1.3s. 'Spegni' cicla fino a tornare a luce spenta.",
             style: TextStyle(color: Colors.white38, fontSize: 12, height: 1.5)),
         ),
       ]);
     },
   );
 
-  Widget _resetButton() => OutlinedButton.icon(
-    onPressed: widget.busy.value ? null : () => widget.onCommand("RESET_STATE"),
-    icon: const Icon(Icons.restart_alt, size: 18),
-    label: const Text("Reset stato (cover chiuso, luce spenta)"),
-    style: OutlinedButton.styleFrom(
-      foregroundColor: Colors.white54,
-      side: const BorderSide(color: Colors.white24),
-      minimumSize: const Size(double.infinity, 46),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+  Widget _resetButton() => AnimatedBuilder(
+    animation: ble.busy,
+    builder: (_, __) => OutlinedButton.icon(
+      onPressed: ble.busy.value ? null : () => ble.send("RESET_STATE"),
+      icon: const Icon(Icons.restart_alt, size: 18),
+      label: const Text("Reset stato (cover chiuso, luce spenta)"),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Colors.white54, side: const BorderSide(color: Colors.white24),
+        minimumSize: const Size(double.infinity, 46),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+    ),
   );
 
-  // ── Connessione ────────────────────────────────────────────────────────────
   Widget _connectSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-    const Text("BLUETOOTH", style: TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 1.2)),
-    const SizedBox(height: 8),
-    AnimatedBuilder(animation: widget.autoReconnecting, builder: (_, __) {
-      final auto = widget.autoReconnecting.value;
-      return SizedBox(width: double.infinity, height: 50, child: ElevatedButton.icon(
-        onPressed: auto ? null : widget.onManualScan,
+    const SizedBox(height: 20),
+    const Center(child: Text("Connetti il WandererCover via Bluetooth",
+      style: TextStyle(color: Colors.white54, fontSize: 15))),
+    const SizedBox(height: 24),
+    AnimatedBuilder(animation: ble.autoReconnecting, builder: (_, __) {
+      final auto = ble.autoReconnecting.value;
+      return SizedBox(width: double.infinity, height: 52, child: ElevatedButton.icon(
+        onPressed: auto ? null : ble.manualScan,
         icon: auto ? const SizedBox(width: 18, height: 18,
           child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
           : const Icon(Icons.bluetooth_searching, size: 20),
-        label: Text(auto ? "Ricerca in corso..." : "Cerca WandererCover via BLE"),
+        label: Text(auto ? "Ricerca in corso..." : "Cerca WandererCover"),
         style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7B68EE),
           foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))));
     }),
-    const SizedBox(height: 16),
-    Row(children: const [
-      Expanded(child: Divider(color: Colors.white12)),
-      Padding(padding: EdgeInsets.symmetric(horizontal: 12), child: Text("oppure", style: TextStyle(color: Colors.white24, fontSize: 12))),
-      Expanded(child: Divider(color: Colors.white12)),
-    ]),
-    const SizedBox(height: 16),
-    const Text("WIFI (stessa rete ASIAir)", style: TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 1.2)),
-    const SizedBox(height: 8),
-    Row(children: [
-      Expanded(child: TextField(controller: _ipCtrl, style: const TextStyle(color: Colors.white),
-        keyboardType: TextInputType.number,
-        decoration: InputDecoration(hintText: "192.168.1.xx", hintStyle: const TextStyle(color: Colors.white24),
-          filled: true, fillColor: const Color(0xFF1A1A2E),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Colors.white12)),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Colors.white12)),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)))),
-      const SizedBox(width: 10),
-      SizedBox(height: 48, width: 100, child: ElevatedButton(
-        onPressed: () => widget.onWifiConnect(_ipCtrl.text.trim()),
-        style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF1A3A2A),
-          foregroundColor: const Color(0xFF4CAF50), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-        child: const Text("Connetti"))),
-    ]),
   ]);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// TAB 2 — Sessione (config + timer opzionale di apertura automatica)
+// TAB 2 — Sessione (config + timer opzionale apertura)
 // ══════════════════════════════════════════════════════════════════════════════
 class TimerTab extends StatefulWidget {
-  final bool Function() isConnectedFn;
-  final ValueNotifier<bool> busy;
-  final ValueNotifier<int> configIdx;
-  final Future<void> Function(String) onCommand;
-  const TimerTab({super.key, required this.isConnectedFn, required this.busy,
-    required this.configIdx, required this.onCommand});
+  final BleManager ble;
+  const TimerTab({super.key, required this.ble});
   @override State<TimerTab> createState() => _TimerTabState();
 }
 
 class _TimerTabState extends State<TimerTab> {
-  bool _timerEnabled = false;        // OPZIONALE
+  bool _timerEnabled = false;
   int  _durationHours = 8;
   int  _durationMins  = 0;
-  int  _sessionConfig = 1;           // quale config usare durante la sessione
+  int  _sessionConfig = 1;
 
   Timer? _ticker;
   bool _running = false;
@@ -636,31 +514,30 @@ class _TimerTabState extends State<TimerTab> {
   Duration _left = Duration.zero;
   String _statusMsg = "";
 
+  BleManager get ble => widget.ble;
+
   @override
   void dispose() { _ticker?.cancel(); super.dispose(); }
 
   int get _durationMs => (_durationHours * 3600 + _durationMins * 60) * 1000;
 
   void _start() async {
-    if (!widget.isConnectedFn()) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Connetti prima l'ESP32")));
+    if (!ble.connected.value) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Connetti prima il dispositivo")));
       return;
     }
-    // 1. Imposta la config luce scelta per la sessione
     setState(() => _statusMsg = "Imposto ${kConfigs[_sessionConfig].name}...");
-    await widget.onCommand("CONFIG_SET:$_sessionConfig");
+    await ble.send("CONFIG_SET:$_sessionConfig");
 
-    // 2. Se il timer è attivo, programma l'apertura automatica
     if (_timerEnabled && _durationMs > 0) {
-      await widget.onCommand("TIMER_START:$_durationMs");
+      await ble.send("TIMER_START:$_durationMs");
       _fireAt = DateTime.now().add(Duration(milliseconds: _durationMs));
       setState(() { _running = true; _statusMsg = ""; });
       _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
         final diff = _fireAt!.difference(DateTime.now());
         if (diff.inSeconds <= 0) {
           _ticker?.cancel();
-          setState(() { _running = false; _left = Duration.zero;
-            _statusMsg = "✓ Cover aperto automaticamente"; });
+          setState(() { _running = false; _left = Duration.zero; _statusMsg = "✓ Cover aperto automaticamente"; });
         } else setState(() => _left = diff);
       });
     } else {
@@ -670,7 +547,7 @@ class _TimerTabState extends State<TimerTab> {
 
   void _cancel() async {
     _ticker?.cancel();
-    await widget.onCommand("TIMER_CANCEL");
+    await ble.send("TIMER_CANCEL");
     setState(() { _running = false; _left = Duration.zero; _statusMsg = "Timer annullato"; });
   }
 
@@ -684,7 +561,7 @@ class _TimerTabState extends State<TimerTab> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text("🌙 Sessione Flat", style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
         const SizedBox(height: 4),
-        const Text("Imposta la config luce e (opzionale) apri il cover a fine sessione",
+        const Text("Imposta la config e (opzionale) apri il cover a fine sessione",
           style: TextStyle(color: Colors.white38, fontSize: 13)),
         const SizedBox(height: 24),
         if (!_running) ...[
@@ -730,8 +607,7 @@ class _TimerTabState extends State<TimerTab> {
             child: Column(children: [
               Icon(Icons.wb_sunny, color: c.color, size: 24),
               const SizedBox(height: 6),
-              Text(c.brightness, style: TextStyle(color: sel ? c.color : Colors.white,
-                fontSize: 16, fontWeight: FontWeight.bold)),
+              Text(c.brightness, style: TextStyle(color: sel ? c.color : Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
               Text("Heater ${c.heater}", style: const TextStyle(color: Colors.white38, fontSize: 10)),
             ]),
           ),
@@ -771,7 +647,7 @@ class _TimerTabState extends State<TimerTab> {
       onPressed: _start,
       icon: const Icon(Icons.play_arrow_rounded),
       label: Text(_timerEnabled
-        ? "Avvia sessione (apre tra ${_durationHours}h ${_durationMins}m)"
+        ? "Avvia (apre tra ${_durationHours}h ${_durationMins}m)"
         : "Attiva ${kConfigs[_sessionConfig].name}"),
       style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7B68EE),
         foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
