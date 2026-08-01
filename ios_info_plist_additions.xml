@@ -1,0 +1,19 @@
+<!--
+  PERMESSI iOS per BLE — WandererCover
+  
+  Aggiungi queste chiavi dentro ios/Runner/Info.plist,
+  nel dizionario <dict> principale (NON sostituire tutto il file).
+-->
+
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>WandererCover usa il Bluetooth per comunicare con il controller del flat panel.</string>
+
+<key>NSBluetoothPeripheralUsageDescription</key>
+<string>WandererCover usa il Bluetooth per comunicare con il controller del flat panel.</string>
+
+<!--
+  Nota: da iOS 13+ basta NSBluetoothAlwaysUsageDescription,
+  ma includiamo entrambe per compatibilità con versioni precedenti.
+  Non serve permesso di localizzazione: su iOS il BLE non lo richiede
+  (a differenza di Android).
+-->
