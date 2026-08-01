@@ -180,7 +180,11 @@ class BleManager {
     if (msg.startsWith("BUSY:")) busy.value = true;
     else if (msg == "READY") { busy.value = false; phase.value = ""; stepInfo.value = ""; }
     else if (msg == "ARMING") { phase.value = "arming"; }
-    else if (msg.startsWith("STEPPING:")) { phase.value = "stepping"; stepInfo.value = msg.substring(9); }
+    else if (msg.startsWith("STEPPING:")) {
+      final info = msg.substring(9);
+      if (info == "reset") { phase.value = "reset"; stepInfo.value = ""; }
+      else { phase.value = "stepping"; stepInfo.value = info; }
+    }
     else if (msg == "COVER:open") coverOpen.value = true;
     else if (msg == "COVER:closed") coverOpen.value = false;
     else if (msg.startsWith("CONFIG_INDEX:")) configIndex.value = int.tryParse(msg.substring(13)) ?? 0;
@@ -352,7 +356,8 @@ class ControlTab extends StatelessWidget {
       // Messaggio dinamico in base alla fase
       String msg = ble.status.value;
       if (ble.phase.value == "arming") msg = "⏳ Attendo standby (13-15s)...";
-      else if (ble.phase.value == "stepping") msg = "🔄 Cambio config — step ${ble.stepInfo.value}";
+      else if (ble.phase.value == "reset") msg = "🔄 Taglio lungo (reset config)...";
+      else if (ble.phase.value == "stepping") msg = "🔄 Config — taglio veloce ${ble.stepInfo.value}";
       return Container(
         width: double.infinity, padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(color: const Color(0xFF1A1A2E),
