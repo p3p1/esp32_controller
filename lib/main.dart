@@ -153,6 +153,11 @@ class BleManager {
           }
         }
       }
+      // Chiede lo stato corrente al firmware (cover + config)
+      if (_char != null) {
+        await Future.delayed(const Duration(milliseconds: 300));
+        try { await _char!.write(utf8.encode("GET_STATE"), withoutResponse: false); } catch (_) {}
+      }
       _connSub?.cancel();
       _connSub = dev.connectionState.listen((st) {
         if (st == BluetoothConnectionState.disconnected) {
@@ -185,7 +190,7 @@ class BleManager {
   Future<bool> send(String cmd) async {
     if (!connected.value || _char == null) return false;
     // I comandi non-taglio (timer/reset/gap) passano anche se busy
-    final immediate = cmd.startsWith("TIMER_") || cmd == "RESET_STATE" || cmd.startsWith("SET_GAP:");
+    final immediate = cmd.startsWith("TIMER_") || cmd == "RESET_STATE" || cmd == "GET_STATE" || cmd.startsWith("SET_GAP:");
     if (busy.value && !immediate) return false;
     try {
       await _char!.write(utf8.encode(cmd), withoutResponse: false);
