@@ -56,6 +56,7 @@ class BleManager {
   final coverOpen        = ValueNotifier<bool>(false);
   final configIndex      = ValueNotifier<int>(0);
   final lastSelected     = ValueNotifier<int>(-1);   // ultima config PREMUTA dall'utente
+  final coverPending     = ValueNotifier<bool>(false); // tocco cover inviato, in attesa conferma
   final phase            = ValueNotifier<String>("");
   final stepInfo         = ValueNotifier<String>("");
   Timer? _statePoll;
@@ -82,7 +83,18 @@ class BleManager {
     lastSelected.value = i;
     final p = await SharedPreferences.getInstance();
     await p.setInt(kPrefLastSel, i);
-    await send("CONFIG_SET:$i");
+    final ok = await send("CONFIG_SET:$i");
+    if (!ok) status.value = "⚠️ Occupato — comando non inviato, riprova";
+  }
+
+  // Toggle cover con feedback pending
+  Future<void> toggleCover() async {
+    coverPending.value = true;
+    final ok = await send("COVER_TOGGLE");
+    if (!ok) {
+      coverPending.value = false;
+      status.value = "⚠️ Occupato — comando non inviato, riprova";
+    }
   }
 
   Future<void> _perms() async {
@@ -185,7 +197,7 @@ class BleManager {
       // Polling periodico dello stato per restare sincronizzati
       _statePoll?.cancel();
       _statePoll = Timer.periodic(const Duration(seconds: 8), (_) {
-        if (connected.value && !busy.value) requestState();
+        if (connected.value) requestState();   // SEMPRE: recupera anche un busy bloccato
       });
     } catch (e) {
       status.value = "Errore: $e";
@@ -196,15 +208,15 @@ class BleManager {
   void _onNotif(List<int> val) {
     final msg = utf8.decode(val);
     if (msg.startsWith("BUSY:")) busy.value = true;
-    else if (msg == "READY") { busy.value = false; phase.value = ""; stepInfo.value = ""; }
+    else if (msg == "READY") { busy.value = false; phase.value = ""; stepInfo.value = ""; coverPending.value = false; }
     else if (msg == "ARMING") { phase.value = "arming"; }
     else if (msg.startsWith("STEPPING:")) {
       final info = msg.substring(9);
       if (info == "reset") { phase.value = "reset"; stepInfo.value = ""; }
       else { phase.value = "stepping"; stepInfo.value = info; }
     }
-    else if (msg == "COVER:open") coverOpen.value = true;
-    else if (msg == "COVER:closed") coverOpen.value = false;
+    else if (msg == "COVER:open") { coverOpen.value = true; coverPending.value = false; }
+    else if (msg == "COVER:closed") { coverOpen.value = false; coverPending.value = false; }
     else if (msg.startsWith("CONFIG_INDEX:")) configIndex.value = int.tryParse(msg.substring(13)) ?? 0;
     else if (msg.startsWith("ERROR:")) { busy.value = false; phase.value = ""; status.value = "Errore: ${msg.substring(6)}"; }
     else if (msg == "SESSION:PHASE1") status.value = "🌙 Fase 1: chiudo + config";
@@ -234,6 +246,7 @@ class BleManager {
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
     _device?.disconnect();
     connected.value = false; autoReconnecting.value = false; busy.value = false;
+    coverPending.value = false;
     status.value = "Disconnesso"; _char = null; _device = null;
   }
 
@@ -405,28 +418,45 @@ class ControlTab extends StatelessWidget {
   );
 
   Widget _coverCard() => AnimatedBuilder(
-    animation: Listenable.merge([ble.coverOpen, ble.busy]),
+    animation: Listenable.merge([ble.coverOpen, ble.busy, ble.coverPending]),
     builder: (_, __) {
       final open = ble.coverOpen.value;
+      final pending = ble.coverPending.value;
       return GestureDetector(
-        onTap: ble.busy.value ? null : () => ble.send("COVER_TOGGLE"),
+        onTap: ble.busy.value ? null : () => ble.toggleCover(),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           width: double.infinity, padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: open ? const Color(0xFF7B68EE).withOpacity(0.12) : const Color(0xFF1A1A2E),
+            color: pending ? const Color(0xFF7B68EE).withOpacity(0.25)
+                 : open ? const Color(0xFF7B68EE).withOpacity(0.12) : const Color(0xFF1A1A2E),
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: open ? const Color(0xFF7B68EE) : Colors.white12, width: open ? 2 : 1)),
+            border: Border.all(
+              color: pending ? const Color(0xFF7B68EE)
+                   : open ? const Color(0xFF7B68EE) : Colors.white12,
+              width: (pending || open) ? 2.5 : 1),
+            boxShadow: pending ? [BoxShadow(color: const Color(0xFF7B68EE).withOpacity(0.4), blurRadius: 14, spreadRadius: 1)] : []),
           child: Column(children: [
-            Icon(open ? Icons.flip_to_front : Icons.flip_to_back,
-              size: 48, color: open ? const Color(0xFF7B68EE) : Colors.white38),
-            const SizedBox(height: 12),
-            Text(open ? "COVER APERTO" : "COVER CHIUSO",
-              style: TextStyle(color: open ? const Color(0xFF7B68EE) : Colors.white70,
-                fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            Text("Tocca per ${open ? 'chiudere' : 'aprire'} (taglio 2.3s)",
-              style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            if (pending) ...[
+              const SizedBox(width: 28, height: 28,
+                child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF7B68EE))),
+              const SizedBox(height: 14),
+              const Text("COMANDO INVIATO",
+                style: TextStyle(color: Color(0xFF7B68EE), fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text(open ? "Chiusura in corso..." : "Apertura in corso...",
+                style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            ] else ...[
+              Icon(open ? Icons.flip_to_front : Icons.flip_to_back,
+                size: 48, color: open ? const Color(0xFF7B68EE) : Colors.white38),
+              const SizedBox(height: 12),
+              Text(open ? "COVER APERTO" : "COVER CHIUSO",
+                style: TextStyle(color: open ? const Color(0xFF7B68EE) : Colors.white70,
+                  fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text("Tocca per ${open ? 'chiudere' : 'aprire'} (taglio 2.3s)",
+                style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            ],
           ]),
         ),
       );
