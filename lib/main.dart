@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -467,23 +468,11 @@ class ControlTab extends StatelessWidget {
           );
         }),
         const SizedBox(height: 4),
-        // Pulsante Spegni — sempre disponibile (fa il taglio lungo di reset)
-        SizedBox(width: double.infinity, height: 48,
-          child: ElevatedButton.icon(
-            onPressed: ble.busy.value ? null : () => ble.send("CONFIG_SET:0"),
-            icon: const Icon(Icons.power_settings_new, size: 18),
-            label: const Text("Spegni luce"),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF442233),
-              foregroundColor: const Color(0xFFFF6B6B),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-          )),
-        const SizedBox(height: 12),
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(color: const Color(0xFF1A1A2E), borderRadius: BorderRadius.circular(10)),
           child: const Text(
-            "💡 Le config sono i preset 1-2-3 di WandererEmpire. Ogni selezione fa un taglio lungo (reset) + N tagli veloci. 'Spegni' fa solo il taglio lungo.",
+            "💡 Le config sono i preset 1-2-3 di WandererEmpire. Ogni selezione fa un taglio lungo (reset) + N tagli veloci. 'Spento' fa solo il taglio lungo.",
             style: TextStyle(color: Colors.white38, fontSize: 12, height: 1.5)),
         ),
       ]);
@@ -539,7 +528,7 @@ class TimerTab extends StatefulWidget {
 class _TimerTabState extends State<TimerTab> {
   // Fase 1 — quando chiudere+config
   String _mode = "duration";      // "duration" | "absolute"
-  int    _p1Hours = 8;
+  int    _p1Hours = 4;
   int    _p1Mins  = 0;
   TimeOfDay _p1Time = const TimeOfDay(hour: 5, minute: 0);
   int    _sessionConfig = 1;
@@ -785,14 +774,31 @@ class _TimerTabState extends State<TimerTab> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
   );
 
-  Widget _spinner(String label, int val, int min, int max, ValueChanged<int> cb) => Container(
+  // Scroll picker a ruota (stile iOS) per ore/minuti
+  Widget _wheelPicker(String label, int val, int max, ValueChanged<int> cb) => Container(
+    height: 140,
     decoration: BoxDecoration(color: const Color(0xFF1A1A2E), borderRadius: BorderRadius.circular(12)),
-    padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-      Text(label, style: const TextStyle(color: Colors.white54, fontSize: 13)),
-      IconButton(onPressed: val > min ? () => cb(val-1) : null, icon: const Icon(Icons.remove, size: 18), color: const Color(0xFF7B68EE)),
-      Text("$val", style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-      IconButton(onPressed: val < max ? () => cb(val+1) : null, icon: const Icon(Icons.add, size: 18), color: const Color(0xFF7B68EE)),
+    child: Column(children: [
+      Padding(padding: const EdgeInsets.only(top: 8),
+        child: Text(label, style: const TextStyle(color: Colors.white38, fontSize: 12))),
+      Expanded(child: CupertinoPicker(
+        scrollController: FixedExtentScrollController(initialItem: val),
+        itemExtent: 34,
+        magnification: 1.15,
+        squeeze: 1.1,
+        useMagnifier: true,
+        selectionOverlay: Container(
+          decoration: BoxDecoration(border: Border.symmetric(
+            horizontal: BorderSide(color: const Color(0xFF7B68EE).withOpacity(0.4), width: 1))),
+        ),
+        onSelectedItemChanged: cb,
+        children: List.generate(max + 1, (i) => Center(
+          child: Text(i.toString().padLeft(2, '0'),
+            style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w600)))),
+      )),
     ]),
   );
+
+  Widget _spinner(String label, int val, int min, int max, ValueChanged<int> cb) =>
+    _wheelPicker(label, val, max, cb);
 }
