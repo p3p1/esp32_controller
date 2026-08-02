@@ -436,7 +436,7 @@ class ControlTab extends StatelessWidget {
         const SizedBox(height: 12),
         ...kConfigs.map((c) {
           final isCur = c.index == cur;
-          final enabled = !ble.busy.value && !isCur;
+          final enabled = !ble.busy.value;   // sempre cliccabile (anche la corrente)
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: GestureDetector(
@@ -445,23 +445,35 @@ class ControlTab extends StatelessWidget {
                 duration: const Duration(milliseconds: 200),
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                 decoration: BoxDecoration(
-                  color: isCur ? c.color.withOpacity(0.15) : const Color(0xFF1A1A2E),
+                  color: isCur ? c.color.withOpacity(0.22) : const Color(0xFF1A1A2E),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: isCur ? c.color : Colors.white12, width: isCur ? 2 : 1)),
+                  border: Border.all(color: isCur ? c.color : Colors.white12, width: isCur ? 2.5 : 1),
+                  boxShadow: isCur ? [BoxShadow(color: c.color.withOpacity(0.35), blurRadius: 12, spreadRadius: 1)] : []),
                 child: Row(children: [
                   Container(width: 44, height: 44,
-                    decoration: BoxDecoration(color: c.color.withOpacity(0.2), shape: BoxShape.circle),
+                    decoration: BoxDecoration(
+                      color: c.color.withOpacity(isCur ? 0.4 : 0.2), shape: BoxShape.circle,
+                      border: isCur ? Border.all(color: c.color, width: 2) : null),
                     child: Icon(c.index == 0 ? Icons.power_settings_new : Icons.wb_sunny, color: c.color, size: 22)),
                   const SizedBox(width: 16),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(c.name, style: TextStyle(color: isCur ? c.color : Colors.white,
-                      fontSize: 16, fontWeight: FontWeight.w600)),
+                    Row(children: [
+                      Text(c.name, style: TextStyle(color: isCur ? c.color : Colors.white,
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+                      if (isCur) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(color: c.color, borderRadius: BorderRadius.circular(6)),
+                          child: const Text("ATTIVO", style: TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold))),
+                      ],
+                    ]),
                     const SizedBox(height: 2),
                     Text(c.index == 0 ? "Luce spenta" : "Luminosità ${c.brightness} · Heater ${c.heater}",
                       style: const TextStyle(color: Colors.white38, fontSize: 12)),
                   ])),
-                  if (isCur) Icon(Icons.check_circle, color: c.color, size: 22)
-                  else if (enabled) const Icon(Icons.chevron_right, color: Colors.white24),
+                  if (isCur) Icon(Icons.check_circle, color: c.color, size: 24)
+                  else const Icon(Icons.chevron_right, color: Colors.white24),
                 ]),
               ),
             ),
