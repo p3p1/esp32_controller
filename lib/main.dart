@@ -11,6 +11,7 @@ const kServiceUUID        = "12345678-1234-1234-1234-123456789abc";
 const kCharacteristicUUID = "87654321-4321-4321-4321-cba987654321";
 const kDeviceName         = "WandererCover";
 const kPrefDeviceId       = 'ble_device_id';
+const kPrefLastSel        = 'last_selected_config';
 
 class LightConfig {
   final int index;
@@ -54,8 +55,10 @@ class BleManager {
   final busy             = ValueNotifier<bool>(false);
   final coverOpen        = ValueNotifier<bool>(false);
   final configIndex      = ValueNotifier<int>(0);
-  final phase            = ValueNotifier<String>("");   // "arming" | "stepping" | ""
-  final stepInfo         = ValueNotifier<String>("");   // es. "2/3"
+  final lastSelected     = ValueNotifier<int>(-1);   // ultima config PREMUTA dall'utente
+  final phase            = ValueNotifier<String>("");
+  final stepInfo         = ValueNotifier<String>("");
+  Timer? _statePoll;
 
   BluetoothDevice?         _device;
   BluetoothCharacteristic? _char;
@@ -67,10 +70,19 @@ class BleManager {
   Future<void> init() async {
     final p = await SharedPreferences.getInstance();
     _knownId = p.getString(kPrefDeviceId);
+    lastSelected.value = p.getInt(kPrefLastSel) ?? -1;
     if (_knownId != null) {
       status.value = "Connessione automatica...";
       startAutoScan();
     }
+  }
+
+  // Registra l'ultima config premuta dall'utente (persistente) e invia il comando
+  Future<void> selectConfig(int i) async {
+    lastSelected.value = i;
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(kPrefLastSel, i);
+    await send("CONFIG_SET:$i");
   }
 
   Future<void> _perms() async {
@@ -170,6 +182,11 @@ class BleManager {
       });
       connected.value = true;
       status.value = auto ? "Riconnesso ✓" : "Connesso ✓";
+      // Polling periodico dello stato per restare sincronizzati
+      _statePoll?.cancel();
+      _statePoll = Timer.periodic(const Duration(seconds: 8), (_) {
+        if (connected.value && !busy.value) requestState();
+      });
     } catch (e) {
       status.value = "Errore: $e";
       if (!_userDisconnected) _scheduleReconnect();
@@ -213,6 +230,7 @@ class BleManager {
 
   void disconnect() {
     _userDisconnected = true;
+    _statePoll?.cancel();
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
     _device?.disconnect();
     connected.value = false; autoReconnecting.value = false; busy.value = false;
@@ -227,6 +245,7 @@ class BleManager {
   }
 
   void dispose() {
+    _statePoll?.cancel();
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
   }
 }
@@ -415,7 +434,7 @@ class ControlTab extends StatelessWidget {
   );
 
   Widget _configSection() => AnimatedBuilder(
-    animation: Listenable.merge([ble.configIndex, ble.busy]),
+    animation: Listenable.merge([ble.configIndex, ble.busy, ble.lastSelected]),
     builder: (_, __) {
       final cur = ble.configIndex.value;
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -435,30 +454,42 @@ class ControlTab extends StatelessWidget {
         ]),
         const SizedBox(height: 12),
         ...kConfigs.map((c) {
-          final isCur = c.index == cur;
-          final enabled = !ble.busy.value;   // sempre cliccabile (anche la corrente)
+          final isCur  = c.index == cur;                              // stato confermato dal firmware
+          final isLast = c.index == ble.lastSelected.value && !isCur; // ultima premuta dall'utente
+          final enabled = !ble.busy.value;
+          const selColor = Color(0xFF7B68EE);   // viola: ultima selezione utente
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: GestureDetector(
-              onTap: enabled ? () => ble.send("CONFIG_SET:${c.index}") : null,
+              onTap: enabled ? () => ble.selectConfig(c.index) : null,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                 decoration: BoxDecoration(
-                  color: isCur ? c.color.withOpacity(0.22) : const Color(0xFF1A1A2E),
+                  color: isCur ? c.color.withOpacity(0.22)
+                       : isLast ? selColor.withOpacity(0.12)
+                       : const Color(0xFF1A1A2E),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: isCur ? c.color : Colors.white12, width: isCur ? 2.5 : 1),
-                  boxShadow: isCur ? [BoxShadow(color: c.color.withOpacity(0.35), blurRadius: 12, spreadRadius: 1)] : []),
+                  border: Border.all(
+                    color: isCur ? c.color : isLast ? selColor : Colors.white12,
+                    width: (isCur || isLast) ? 2.5 : 1),
+                  boxShadow: isCur
+                      ? [BoxShadow(color: c.color.withOpacity(0.35), blurRadius: 12, spreadRadius: 1)]
+                      : isLast
+                          ? [BoxShadow(color: selColor.withOpacity(0.25), blurRadius: 10)]
+                          : []),
                 child: Row(children: [
                   Container(width: 44, height: 44,
                     decoration: BoxDecoration(
-                      color: c.color.withOpacity(isCur ? 0.4 : 0.2), shape: BoxShape.circle,
-                      border: isCur ? Border.all(color: c.color, width: 2) : null),
+                      color: c.color.withOpacity(isCur ? 0.45 : 0.2), shape: BoxShape.circle,
+                      border: isCur ? Border.all(color: c.color, width: 2)
+                            : isLast ? Border.all(color: selColor, width: 2) : null),
                     child: Icon(c.index == 0 ? Icons.power_settings_new : Icons.wb_sunny, color: c.color, size: 22)),
                   const SizedBox(width: 16),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
-                      Text(c.name, style: TextStyle(color: isCur ? c.color : Colors.white,
+                      // Nome sempre BIANCO quando attivo (leggibilità)
+                      Text(c.name, style: const TextStyle(color: Colors.white,
                         fontSize: 16, fontWeight: FontWeight.w600)),
                       if (isCur) ...[
                         const SizedBox(width: 8),
@@ -466,6 +497,13 @@ class ControlTab extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(color: c.color, borderRadius: BorderRadius.circular(6)),
                           child: const Text("ATTIVO", style: TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold))),
+                      ],
+                      if (isLast) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(color: selColor, borderRadius: BorderRadius.circular(6)),
+                          child: const Text("SELEZIONATA", style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))),
                       ],
                     ]),
                     const SizedBox(height: 2),
@@ -549,6 +587,7 @@ class _TimerTabState extends State<TimerTab> {
   bool _phase2Enabled = false;
   int  _p2Hours = 0;
   int  _p2Mins  = 30;
+  bool _closeFirst = true;   // chiudi il cover prima di attivare la config
 
   Timer? _ticker;
   bool _running = false;
@@ -582,7 +621,7 @@ class _TimerTabState extends State<TimerTab> {
     }
     final p1 = _phase1Ms;
     final p2 = _phase2Ms;
-    await ble.send("SESSION_START:$p1:$_sessionConfig:$p2");
+    await ble.send("SESSION_START:$p1:$_sessionConfig:$p2:${_closeFirst ? 1 : 0}");
 
     _phase1At = DateTime.now().add(Duration(milliseconds: p1));
     _phase2At = p2 > 0 ? _phase1At!.add(Duration(milliseconds: p2)) : null;
@@ -635,6 +674,8 @@ class _TimerTabState extends State<TimerTab> {
           const SizedBox(height: 24),
           _configPicker(),
           const SizedBox(height: 24),
+          _closeFirstToggle(),
+          const SizedBox(height: 16),
           _phase2Section(),
           const SizedBox(height: 24),
           _startButton(),
@@ -724,6 +765,20 @@ class _TimerTabState extends State<TimerTab> {
             ])))));
     }).toList()),
   ]);
+
+  // ── Opzione: chiudi cover prima della config ───────────────────────────────
+  Widget _closeFirstToggle() => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+    decoration: BoxDecoration(color: const Color(0xFF1A1A2E), borderRadius: BorderRadius.circular(12)),
+    child: Row(children: [
+      const Icon(Icons.flip_to_back, color: Color(0xFF4CAF50), size: 20),
+      const SizedBox(width: 12),
+      const Expanded(child: Text("Chiudi il cover prima di attivare la config",
+        style: TextStyle(color: Colors.white70, fontSize: 14))),
+      Switch(value: _closeFirst, activeColor: const Color(0xFF4CAF50),
+        onChanged: (v) => setState(() => _closeFirst = v)),
+    ]),
+  );
 
   // ── Fase 2: apertura opzionale ──────────────────────────────────────────────
   Widget _phase2Section() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
