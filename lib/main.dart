@@ -89,6 +89,21 @@ class BleManager {
     _awaitingConfig = i;   // alla conferma READY, configIndex diventerà i
   }
 
+  // Reset stato: allinea app E firmware a cover chiuso + luce spenta
+  Future<void> resetState() async {
+    // Azzera SUBITO lo stato locale dell'app (feedback immediato)
+    coverOpen.value = false;
+    configIndex.value = 0;
+    lastSelected.value = 0;
+    coverPending.value = false;
+    _awaitingConfig = -1;
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(kPrefLastSel, 0);
+    status.value = "Stato riallineato: cover chiuso, luce spenta";
+    // Invia anche al firmware
+    await send("RESET_STATE");
+  }
+
   // Toggle cover con feedback pending + timeout di sicurezza
   Future<void> toggleCover() async {
     coverPending.value = true;
@@ -484,28 +499,16 @@ class ControlTab extends StatelessWidget {
   Widget _configSection() => AnimatedBuilder(
     animation: Listenable.merge([ble.configIndex, ble.busy, ble.lastSelected]),
     builder: (_, __) {
-      final cur = ble.configIndex.value;
+      // Fonte di verità unica: la config attiva è l'ultima selezionata dall'utente.
+      // Se nessuna è mai stata selezionata, usa lo stato del firmware.
+      final active = ble.lastSelected.value >= 0 ? ble.lastSelected.value : ble.configIndex.value;
+      final isBusy = ble.busy.value;
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          const Text("CONFIGURAZIONE LUCE", style: TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 1.2)),
-          const Spacer(),
-          // Stato corrente sempre visibile
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: kConfigs[cur].color.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(20)),
-            child: Text(
-              cur == 0 ? "Attuale: Spento" : "Attuale: ${kConfigs[cur].name}",
-              style: TextStyle(color: kConfigs[cur].color, fontSize: 11, fontWeight: FontWeight.w600)),
-          ),
-        ]),
+        const Text("CONFIGURAZIONE LUCE", style: TextStyle(color: Colors.white38, fontSize: 11, letterSpacing: 1.2)),
         const SizedBox(height: 12),
         ...kConfigs.map((c) {
-          final isCur  = c.index == cur;                              // stato confermato dal firmware
-          final isLast = c.index == ble.lastSelected.value && !isCur; // ultima premuta dall'utente
-          final enabled = !ble.busy.value;
-          const selColor = Color(0xFF7B68EE);   // viola: ultima selezione utente
+          final isActive = c.index == active;
+          final enabled = !isBusy;
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: GestureDetector(
@@ -514,51 +517,39 @@ class ControlTab extends StatelessWidget {
                 duration: const Duration(milliseconds: 200),
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
                 decoration: BoxDecoration(
-                  color: isCur ? c.color.withOpacity(0.22)
-                       : isLast ? selColor.withOpacity(0.12)
-                       : const Color(0xFF1A1A2E),
+                  color: isActive ? c.color.withOpacity(0.22) : const Color(0xFF1A1A2E),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: isCur ? c.color : isLast ? selColor : Colors.white12,
-                    width: (isCur || isLast) ? 2.5 : 1),
-                  boxShadow: isCur
-                      ? [BoxShadow(color: c.color.withOpacity(0.35), blurRadius: 12, spreadRadius: 1)]
-                      : isLast
-                          ? [BoxShadow(color: selColor.withOpacity(0.25), blurRadius: 10)]
-                          : []),
+                  border: Border.all(color: isActive ? c.color : Colors.white12, width: isActive ? 2.5 : 1),
+                  boxShadow: isActive
+                      ? [BoxShadow(color: c.color.withOpacity(0.4), blurRadius: 12, spreadRadius: 1)] : []),
                 child: Row(children: [
                   Container(width: 44, height: 44,
                     decoration: BoxDecoration(
-                      color: c.color.withOpacity(isCur ? 0.45 : 0.2), shape: BoxShape.circle,
-                      border: isCur ? Border.all(color: c.color, width: 2)
-                            : isLast ? Border.all(color: selColor, width: 2) : null),
+                      color: c.color.withOpacity(isActive ? 0.45 : 0.2), shape: BoxShape.circle,
+                      border: isActive ? Border.all(color: c.color, width: 2) : null),
                     child: Icon(c.index == 0 ? Icons.power_settings_new : Icons.wb_sunny, color: c.color, size: 22)),
                   const SizedBox(width: 16),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
-                      // Nome sempre BIANCO quando attivo (leggibilità)
-                      Text(c.name, style: const TextStyle(color: Colors.white,
-                        fontSize: 16, fontWeight: FontWeight.w600)),
-                      if (isCur) ...[
+                      Text(c.name, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
+                      if (isActive) ...[
                         const SizedBox(width: 8),
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(color: c.color, borderRadius: BorderRadius.circular(6)),
-                          child: const Text("ATTIVO", style: TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold))),
-                      ],
-                      if (isLast) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(color: selColor, borderRadius: BorderRadius.circular(6)),
-                          child: const Text("SELEZIONATA", style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))),
+                          // Durante l'operazione mostra "IN CORSO", a fine "ATTIVO"
+                          child: Text(isBusy ? "IN CORSO" : "ATTIVO",
+                            style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold))),
                       ],
                     ]),
                     const SizedBox(height: 2),
                     Text(c.index == 0 ? "Luce spenta" : "Luminosità ${c.brightness} · Heater ${c.heater}",
                       style: const TextStyle(color: Colors.white38, fontSize: 12)),
                   ])),
-                  if (isCur) Icon(Icons.check_circle, color: c.color, size: 24)
+                  if (isActive && isBusy)
+                    const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  else if (isActive)
+                    Icon(Icons.check_circle, color: c.color, size: 24)
                   else const Icon(Icons.chevron_right, color: Colors.white24),
                 ]),
               ),
@@ -580,7 +571,7 @@ class ControlTab extends StatelessWidget {
   Widget _resetButton() => AnimatedBuilder(
     animation: ble.busy,
     builder: (_, __) => OutlinedButton.icon(
-      onPressed: ble.busy.value ? null : () => ble.send("RESET_STATE"),
+      onPressed: ble.busy.value ? null : () => ble.resetState(),
       icon: const Icon(Icons.restart_alt, size: 18),
       label: const Text("Reset stato (cover chiuso, luce spenta)"),
       style: OutlinedButton.styleFrom(
