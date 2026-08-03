@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 // ── Constants ─────────────────────────────────────────────────────────────────
 const kServiceUUID        = "12345678-1234-1234-1234-123456789abc";
 const kCharacteristicUUID = "87654321-4321-4321-4321-cba987654321";
+const kStateCharUUID      = "11112222-3333-4444-5555-666677778888";
 const kDeviceName         = "WandererCover";
 const kPrefDeviceId       = 'ble_device_id';
 const kPrefLastSel        = 'last_selected_config';
@@ -71,6 +72,7 @@ class BleManager {
 
   BluetoothDevice?         _device;
   BluetoothCharacteristic? _char;
+  BluetoothCharacteristic? _stateChar;
   StreamSubscription?      _notifSub, _scanSub, _connSub;
   Timer?                   _reconnectTimer;
   String?                  _knownId;
@@ -206,15 +208,15 @@ class BleManager {
               await c.setNotifyValue(true);
               _notifSub?.cancel();
               _notifSub = c.onValueReceived.listen(_onNotif);
+            } else if (c.uuid.toString().toLowerCase() == kStateCharUUID) {
+              _stateChar = c;
             }
           }
         }
       }
-      // Chiede lo stato corrente al firmware (cover + config)
-      if (_char != null) {
-        await Future.delayed(const Duration(milliseconds: 300));
-        try { await _char!.write(utf8.encode("GET_STATE"), withoutResponse: false); } catch (_) {}
-      }
+      // Legge lo stato reale dalla caratteristica READ (garantito, non si perde)
+      await Future.delayed(const Duration(milliseconds: 300));
+      await readState();
       _connSub?.cancel();
       _connSub = dev.connectionState.listen((st) {
         if (st == BluetoothConnectionState.disconnected) {
@@ -243,11 +245,12 @@ class BleManager {
     else if (msg == "READY") {
       busy.value = false; phase.value = ""; stepInfo.value = ""; coverPending.value = false;
       _coverTimeout?.cancel();
-      // A operazione finita, lo stato reale = ultima config richiesta dall'utente
       if (_awaitingConfig >= 0) {
         configIndex.value = _awaitingConfig;
         _awaitingConfig = -1;
       }
+      // Richiede lo stato reale al firmware per risincronizzare (le notifiche push si perdono)
+      Future.delayed(const Duration(milliseconds: 400), requestState);
     }
     else if (msg == "ARMING") { phase.value = "arming"; }
     else if (msg.startsWith("STEPPING:")) {
@@ -275,9 +278,31 @@ class BleManager {
   }
 
   // Richiede lo stato corrente al firmware
-  Future<void> requestState() async {
-    if (_char == null) return;
-    try { await _char!.write(utf8.encode("GET_STATE"), withoutResponse: false); } catch (_) {}
+  Future<void> requestState() async => readState();
+
+  // Legge lo stato dalla caratteristica READ: "cover,config,ready"
+  // Metodo affidabile — la READ non si perde come le notifiche push
+  Future<void> readState() async {
+    if (_stateChar == null) {
+      // fallback: vecchio metodo via GET_STATE se la caratteristica non c'è
+      if (_char != null) {
+        try { await _char!.write(utf8.encode("GET_STATE"), withoutResponse: false); } catch (_) {}
+      }
+      return;
+    }
+    try {
+      final raw = await _stateChar!.read();
+      final s = utf8.decode(raw);
+      final parts = s.split(',');
+      if (parts.length >= 3) {
+        coverOpen.value = parts[0] == "open";
+        final cfg = int.tryParse(parts[1]) ?? 0;
+        configIndex.value = cfg;
+        lastSelected.value = cfg;   // allinea l'evidenziazione allo stato reale
+        busy.value = parts[2] != "1";
+        coverPending.value = false;
+      }
+    } catch (_) {}
   }
 
   void disconnect() {
@@ -287,7 +312,7 @@ class BleManager {
     _device?.disconnect();
     connected.value = false; autoReconnecting.value = false; busy.value = false;
     coverPending.value = false;
-    status.value = "Disconnesso"; _char = null; _device = null;
+    status.value = "Disconnesso"; _char = null; _stateChar = null; _device = null;
   }
 
   Future<void> forget() async {
