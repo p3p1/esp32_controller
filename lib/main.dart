@@ -60,6 +60,7 @@ class BleManager {
   final phase            = ValueNotifier<String>("");
   final stepInfo         = ValueNotifier<String>("");
   Timer? _statePoll;
+  int _awaitingConfig = -1;   // config richiesta in attesa di conferma READY
 
   BluetoothDevice?         _device;
   BluetoothCharacteristic? _char;
@@ -84,18 +85,27 @@ class BleManager {
     final p = await SharedPreferences.getInstance();
     await p.setInt(kPrefLastSel, i);
     final ok = await send("CONFIG_SET:$i");
-    if (!ok) status.value = "⚠️ Occupato — comando non inviato, riprova";
+    if (!ok) { status.value = "⚠️ Occupato — riprova"; return; }
+    _awaitingConfig = i;   // alla conferma READY, configIndex diventerà i
   }
 
-  // Toggle cover con feedback pending
+  // Toggle cover con feedback pending + timeout di sicurezza
   Future<void> toggleCover() async {
     coverPending.value = true;
     final ok = await send("COVER_TOGGLE");
     if (!ok) {
       coverPending.value = false;
-      status.value = "⚠️ Occupato — comando non inviato, riprova";
+      status.value = "⚠️ Occupato — riprova";
+      return;
     }
+    // Timeout: se il firmware non conferma entro 30s, chiudi comunque il pending
+    _coverTimeout?.cancel();
+    _coverTimeout = Timer(const Duration(seconds: 30), () {
+      coverPending.value = false;
+      requestState();   // risincronizza lo stato reale
+    });
   }
+  Timer? _coverTimeout;
 
   Future<void> _perms() async {
     await [Permission.bluetoothScan, Permission.bluetoothConnect,
@@ -208,15 +218,23 @@ class BleManager {
   void _onNotif(List<int> val) {
     final msg = utf8.decode(val);
     if (msg.startsWith("BUSY:")) busy.value = true;
-    else if (msg == "READY") { busy.value = false; phase.value = ""; stepInfo.value = ""; coverPending.value = false; }
+    else if (msg == "READY") {
+      busy.value = false; phase.value = ""; stepInfo.value = ""; coverPending.value = false;
+      _coverTimeout?.cancel();
+      // A operazione finita, lo stato reale = ultima config richiesta dall'utente
+      if (_awaitingConfig >= 0) {
+        configIndex.value = _awaitingConfig;
+        _awaitingConfig = -1;
+      }
+    }
     else if (msg == "ARMING") { phase.value = "arming"; }
     else if (msg.startsWith("STEPPING:")) {
       final info = msg.substring(9);
       if (info == "reset") { phase.value = "reset"; stepInfo.value = ""; }
       else { phase.value = "stepping"; stepInfo.value = info; }
     }
-    else if (msg == "COVER:open") { coverOpen.value = true; coverPending.value = false; }
-    else if (msg == "COVER:closed") { coverOpen.value = false; coverPending.value = false; }
+    else if (msg == "COVER:open") { coverOpen.value = true; coverPending.value = false; _coverTimeout?.cancel(); }
+    else if (msg == "COVER:closed") { coverOpen.value = false; coverPending.value = false; _coverTimeout?.cancel(); }
     else if (msg.startsWith("CONFIG_INDEX:")) configIndex.value = int.tryParse(msg.substring(13)) ?? 0;
     else if (msg.startsWith("ERROR:")) { busy.value = false; phase.value = ""; status.value = "Errore: ${msg.substring(6)}"; }
     else if (msg == "SESSION:PHASE1") status.value = "🌙 Fase 1: chiudo + config";
@@ -242,7 +260,7 @@ class BleManager {
 
   void disconnect() {
     _userDisconnected = true;
-    _statePoll?.cancel();
+    _statePoll?.cancel(); _coverTimeout?.cancel();
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
     _device?.disconnect();
     connected.value = false; autoReconnecting.value = false; busy.value = false;
@@ -258,7 +276,7 @@ class BleManager {
   }
 
   void dispose() {
-    _statePoll?.cancel();
+    _statePoll?.cancel(); _coverTimeout?.cancel();
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
   }
 }
@@ -356,34 +374,34 @@ class ControlTab extends StatelessWidget {
   Widget _header(BuildContext context) => Row(children: [
     const Text("🔭", style: TextStyle(fontSize: 28)),
     const SizedBox(width: 10),
-    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text("WandererCover",
-        style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
-      AnimatedBuilder(
-        animation: Listenable.merge([ble.connected, ble.autoReconnecting]),
-        builder: (_, __) {
-          String s = ble.autoReconnecting.value ? "🔄 Ricerca automatica..."
-              : ble.connected.value ? "📶 Bluetooth" : "Non connesso";
-          return Text(s, style: const TextStyle(color: Colors.white38, fontSize: 12));
-        }),
-    ])),
+    const Expanded(child: Text("WandererCover",
+      style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold))),
+    // Menu discreto per "dimentica dispositivo" (solo se connesso)
     if (ble.connected.value)
-      IconButton(
-        onPressed: () async {
-          final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
-            backgroundColor: const Color(0xFF1A1A2E),
-            title: const Text("Dimentica dispositivo", style: TextStyle(color: Colors.white)),
-            content: const Text("La prossima volta dovrai cercarlo manualmente.",
-              style: TextStyle(color: Colors.white54)),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Annulla")),
-              TextButton(onPressed: () => Navigator.pop(context, true),
-                child: const Text("Dimentica", style: TextStyle(color: Color(0xFFFF6B6B)))),
-            ],
-          ));
-          if (ok == true) await ble.forget();
+      PopupMenuButton<String>(
+        icon: const Icon(Icons.more_vert, size: 20, color: Colors.white38),
+        color: const Color(0xFF1A1A2E),
+        onSelected: (v) async {
+          if (v == 'forget') {
+            final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
+              backgroundColor: const Color(0xFF1A1A2E),
+              title: const Text("Dimentica dispositivo", style: TextStyle(color: Colors.white)),
+              content: const Text("La prossima volta dovrai cercarlo manualmente.",
+                style: TextStyle(color: Colors.white54)),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Annulla")),
+                TextButton(onPressed: () => Navigator.pop(context, true),
+                  child: const Text("Dimentica", style: TextStyle(color: Color(0xFFFF6B6B)))),
+              ],
+            ));
+            if (ok == true) await ble.forget();
+          }
         },
-        icon: const Icon(Icons.link_off, size: 20, color: Colors.white24)),
+        itemBuilder: (_) => [
+          const PopupMenuItem(value: 'forget',
+            child: Text("Dimentica dispositivo", style: TextStyle(color: Colors.white70))),
+        ],
+      ),
   ]);
 
   Widget _statusCard() => AnimatedBuilder(
