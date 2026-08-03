@@ -12,6 +12,13 @@ const kCharacteristicUUID = "87654321-4321-4321-4321-cba987654321";
 const kDeviceName         = "WandererCover";
 const kPrefDeviceId       = 'ble_device_id';
 const kPrefLastSel        = 'last_selected_config';
+const kPrefSessConfig     = 'session_config';
+const kPrefSessP1H        = 'session_p1_hours';
+const kPrefSessP1M        = 'session_p1_mins';
+const kPrefSessMode       = 'session_mode';
+const kPrefSessPh2En      = 'session_phase2_enabled';
+const kPrefSessP2H        = 'session_p2_hours';
+const kPrefSessP2M        = 'session_p2_mins';
 
 class LightConfig {
   final int index;
@@ -638,7 +645,45 @@ class _TimerTabState extends State<TimerTab> {
   BleManager get ble => widget.ble;
 
   @override
-  void dispose() { _ticker?.cancel(); super.dispose(); }
+  void initState() {
+    super.initState();
+    _loadSession();
+    // Auto-imposta il toggle "chiudi cover" in base allo stato attuale del cover
+    _closeFirst = ble.coverOpen.value;
+    // Aggiorna il toggle se lo stato cover cambia mentre sei nella schermata
+    ble.coverOpen.addListener(_syncCloseFirst);
+  }
+
+  void _syncCloseFirst() {
+    if (mounted && !_running) setState(() => _closeFirst = ble.coverOpen.value);
+  }
+
+  Future<void> _loadSession() async {
+    final p = await SharedPreferences.getInstance();
+    setState(() {
+      _sessionConfig  = p.getInt(kPrefSessConfig) ?? 1;
+      _p1Hours        = p.getInt(kPrefSessP1H) ?? 4;
+      _p1Mins         = p.getInt(kPrefSessP1M) ?? 0;
+      _mode           = p.getString(kPrefSessMode) ?? "duration";
+      _phase2Enabled  = p.getBool(kPrefSessPh2En) ?? false;
+      _p2Hours        = p.getInt(kPrefSessP2H) ?? 0;
+      _p2Mins         = p.getInt(kPrefSessP2M) ?? 30;
+    });
+  }
+
+  Future<void> _saveSession() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setInt(kPrefSessConfig, _sessionConfig);
+    await p.setInt(kPrefSessP1H, _p1Hours);
+    await p.setInt(kPrefSessP1M, _p1Mins);
+    await p.setString(kPrefSessMode, _mode);
+    await p.setBool(kPrefSessPh2En, _phase2Enabled);
+    await p.setInt(kPrefSessP2H, _p2Hours);
+    await p.setInt(kPrefSessP2M, _p2Mins);
+  }
+
+  @override
+  void dispose() { _ticker?.cancel(); ble.coverOpen.removeListener(_syncCloseFirst); super.dispose(); }
 
   int get _phase1Ms {
     if (_mode == "duration") {
@@ -660,6 +705,7 @@ class _TimerTabState extends State<TimerTab> {
     }
     final p1 = _phase1Ms;
     final p2 = _phase2Ms;
+    await _saveSession();   // ricorda i valori per la prossima volta
     await ble.send("SESSION_START:$p1:$_sessionConfig:$p2:${_closeFirst ? 1 : 0}");
 
     _phase1At = DateTime.now().add(Duration(milliseconds: p1));
@@ -807,13 +853,18 @@ class _TimerTabState extends State<TimerTab> {
 
   // ── Opzione: chiudi cover prima della config ───────────────────────────────
   Widget _closeFirstToggle() => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
     decoration: BoxDecoration(color: const Color(0xFF1A1A2E), borderRadius: BorderRadius.circular(12)),
     child: Row(children: [
       const Icon(Icons.flip_to_back, color: Color(0xFF4CAF50), size: 20),
       const SizedBox(width: 12),
-      const Expanded(child: Text("Chiudi il cover prima di attivare la config",
-        style: TextStyle(color: Colors.white70, fontSize: 14))),
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text("Chiudi il cover prima di attivare la config",
+          style: TextStyle(color: Colors.white70, fontSize: 14)),
+        const SizedBox(height: 2),
+        Text(ble.coverOpen.value ? "Cover ora aperto → consigliato ON" : "Cover ora chiuso → non necessario",
+          style: const TextStyle(color: Colors.white38, fontSize: 11)),
+      ])),
       Switch(value: _closeFirst, activeColor: const Color(0xFF4CAF50),
         onChanged: (v) => setState(() => _closeFirst = v)),
     ]),
