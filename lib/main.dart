@@ -66,6 +66,7 @@ class BleManager {
   final lastSelected     = ValueNotifier<int>(-1);   // ultima config PREMUTA dall'utente
   final coverPending     = ValueNotifier<bool>(false); // tocco cover inviato, in attesa conferma
   final debugInfo        = ValueNotifier<String>(""); // ultima lettura/errore, per diagnosi
+  final discoveredProps  = ValueNotifier<String>(""); // proprietà BLE scoperte alla connessione (persistente)
   final phase            = ValueNotifier<String>("");
   final stepInfo         = ValueNotifier<String>("");
   Timer? _statePoll;
@@ -216,13 +217,18 @@ class BleManager {
               _notifSub = c.onValueReceived.listen(_onNotif);
             } else if (c.uuid.toString().toLowerCase() == kStateCharUUID) {
               _stateChar = c;
+              // Mostra esattamente cosa ha scoperto flutter_blue_plus per questa
+              // caratteristica — dice la verità senza bisogno di app esterne.
+              final p = c.properties;
+              discoveredProps.value = "proprietà rilevate: read=${p.read} write=${p.write} "
+                  "notify=${p.notify} indicate=${p.indicate}";
             }
           }
         }
       }
       if (_stateChar == null) {
-        // La caratteristica di stato non è stata trovata: probabile cache GATT
-        // del telefono non aggiornata dopo un reflash del firmware.
+        // La caratteristica di stato non è stata trovata affatto nei servizi
+        discoveredProps.value = "caratteristica STATE_CHAR non trovata nei servizi scoperti";
         status.value = "⚠️ Stato non affidabile — vai in Bluetooth di sistema, "
             "dimentica 'WandererCover' e riconnetti dall'app";
       }
@@ -487,20 +493,28 @@ class ControlTab extends StatelessWidget {
   // Pannello diagnostico: mostra esattamente cosa succede nell'ultima lettura
   // dello stato, così un fallimento non resta più invisibile.
   Widget _debugPanel() => AnimatedBuilder(
-    animation: ble.debugInfo,
+    animation: Listenable.merge([ble.debugInfo, ble.discoveredProps]),
     builder: (_, __) => GestureDetector(
       onTap: () => ble.readState(),
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(color: const Color(0xFF141420), borderRadius: BorderRadius.circular(8)),
-        child: Row(children: [
-          const Icon(Icons.bug_report_outlined, size: 14, color: Colors.white24),
-          const SizedBox(width: 8),
-          Expanded(child: Text(
-            ble.debugInfo.value.isEmpty ? "tocca per leggere lo stato ora" : ble.debugInfo.value,
-            style: const TextStyle(color: Colors.white38, fontSize: 10, fontFamily: 'monospace'))),
-          const Icon(Icons.refresh, size: 14, color: Colors.white24),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (ble.discoveredProps.value.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(ble.discoveredProps.value,
+                style: const TextStyle(color: Color(0xFFFFD700), fontSize: 10, fontFamily: 'monospace')),
+            ),
+          Row(children: [
+            const Icon(Icons.bug_report_outlined, size: 14, color: Colors.white24),
+            const SizedBox(width: 8),
+            Expanded(child: Text(
+              ble.debugInfo.value.isEmpty ? "tocca per leggere lo stato ora" : ble.debugInfo.value,
+              style: const TextStyle(color: Colors.white38, fontSize: 10, fontFamily: 'monospace'))),
+            const Icon(Icons.refresh, size: 14, color: Colors.white24),
+          ]),
         ]),
       ),
     ),
