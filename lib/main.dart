@@ -106,6 +106,10 @@ class BleManager {
     lastSelected.value = 0;
     coverPending.value = false;
     _awaitingConfig = -1;
+    busy.value = false;         // sblocca il pulsante se era rimasto "occupato" per errore
+    phase.value = "";
+    _busyWatchdog?.cancel();
+    _coverTimeout?.cancel();
     final p = await SharedPreferences.getInstance();
     await p.setInt(kPrefLastSel, 0);
     status.value = "Stato riallineato: cover chiuso, luce spenta";
@@ -130,6 +134,7 @@ class BleManager {
     });
   }
   Timer? _coverTimeout;
+  Timer? _busyWatchdog;
 
   Future<void> _perms() async {
     await [Permission.bluetoothScan, Permission.bluetoothConnect,
@@ -241,9 +246,21 @@ class BleManager {
 
   void _onNotif(List<int> val) {
     final msg = utf8.decode(val);
-    if (msg.startsWith("BUSY:")) busy.value = true;
+    if (msg.startsWith("BUSY:")) {
+      busy.value = true;
+      // Watchdog: un'operazione reale dura al massimo ~16s (14s standby + taglio).
+      // Se dopo 22s non arriva READY (notifica persa), sblocca da solo.
+      _busyWatchdog?.cancel();
+      _busyWatchdog = Timer(const Duration(seconds: 22), () {
+        busy.value = false;
+        coverPending.value = false;
+        status.value = "⚠️ Nessuna conferma ricevuta — stato sbloccato, verifica manualmente";
+        readState();
+      });
+    }
     else if (msg == "READY") {
       busy.value = false; phase.value = ""; stepInfo.value = ""; coverPending.value = false;
+      _busyWatchdog?.cancel();
       _coverTimeout?.cancel();
       if (_awaitingConfig >= 0) {
         configIndex.value = _awaitingConfig;
@@ -261,7 +278,7 @@ class BleManager {
     else if (msg == "COVER:open") { coverOpen.value = true; coverPending.value = false; _coverTimeout?.cancel(); }
     else if (msg == "COVER:closed") { coverOpen.value = false; coverPending.value = false; _coverTimeout?.cancel(); }
     else if (msg.startsWith("CONFIG_INDEX:")) configIndex.value = int.tryParse(msg.substring(13)) ?? 0;
-    else if (msg.startsWith("ERROR:")) { busy.value = false; phase.value = ""; status.value = "Errore: ${msg.substring(6)}"; }
+    else if (msg.startsWith("ERROR:")) { busy.value = false; phase.value = ""; _busyWatchdog?.cancel(); status.value = "Errore: ${msg.substring(6)}"; }
     else if (msg == "SESSION:PHASE1") status.value = "🌙 Fase 1: chiudo + config";
     else if (msg == "SESSION:PHASE2") status.value = "🔓 Fase 2: apro cover";
     else if (msg == "SESSION:DONE") status.value = "✓ Sessione completata";
@@ -307,7 +324,7 @@ class BleManager {
 
   void disconnect() {
     _userDisconnected = true;
-    _statePoll?.cancel(); _coverTimeout?.cancel();
+    _statePoll?.cancel(); _coverTimeout?.cancel(); _busyWatchdog?.cancel();
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
     _device?.disconnect();
     connected.value = false; autoReconnecting.value = false; busy.value = false;
@@ -323,7 +340,7 @@ class BleManager {
   }
 
   void dispose() {
-    _statePoll?.cancel(); _coverTimeout?.cancel();
+    _statePoll?.cancel(); _coverTimeout?.cancel(); _busyWatchdog?.cancel();
     _reconnectTimer?.cancel(); _scanSub?.cancel(); _notifSub?.cancel(); _connSub?.cancel();
   }
 }
