@@ -65,6 +65,7 @@ class BleManager {
   final configIndex      = ValueNotifier<int>(0);
   final lastSelected     = ValueNotifier<int>(-1);   // ultima config PREMUTA dall'utente
   final coverPending     = ValueNotifier<bool>(false); // tocco cover inviato, in attesa conferma
+  final debugInfo        = ValueNotifier<String>(""); // ultima lettura/errore, per diagnosi
   final phase            = ValueNotifier<String>("");
   final stepInfo         = ValueNotifier<String>("");
   Timer? _statePoll;
@@ -219,6 +220,12 @@ class BleManager {
           }
         }
       }
+      if (_stateChar == null) {
+        // La caratteristica di stato non è stata trovata: probabile cache GATT
+        // del telefono non aggiornata dopo un reflash del firmware.
+        status.value = "⚠️ Stato non affidabile — vai in Bluetooth di sistema, "
+            "dimentica 'WandererCover' e riconnetti dall'app";
+      }
       // Legge lo stato reale dalla caratteristica READ (garantito, non si perde)
       await Future.delayed(const Duration(milliseconds: 300));
       await readState();
@@ -300,10 +307,12 @@ class BleManager {
   // Legge lo stato dalla caratteristica READ: "cover,config,ready"
   // Metodo affidabile — la READ non si perde come le notifiche push
   Future<void> readState() async {
+    final ts = DateTime.now().toIso8601String().substring(11, 19);
     if (_stateChar == null) {
-      // fallback: vecchio metodo via GET_STATE se la caratteristica non c'è
+      debugInfo.value = "[$ts] caratteristica stato NON TROVATA — fallback GET_STATE";
       if (_char != null) {
-        try { await _char!.write(utf8.encode("GET_STATE"), withoutResponse: false); } catch (_) {}
+        try { await _char!.write(utf8.encode("GET_STATE"), withoutResponse: false); }
+        catch (e) { debugInfo.value = "[$ts] GET_STATE fallito: $e"; }
       }
       return;
     }
@@ -318,8 +327,13 @@ class BleManager {
         lastSelected.value = cfg;   // allinea l'evidenziazione allo stato reale
         busy.value = parts[2] != "1";
         coverPending.value = false;
+        debugInfo.value = "[$ts] letto OK: \"$s\" → cover=${coverOpen.value}, config=$cfg";
+      } else {
+        debugInfo.value = "[$ts] letto ma formato inatteso: \"$s\"";
       }
-    } catch (_) {}
+    } catch (e) {
+      debugInfo.value = "[$ts] LETTURA FALLITA: $e";
+    }
   }
 
   void disconnect() {
@@ -415,6 +429,8 @@ class ControlTab extends StatelessWidget {
           _header(context),
           const SizedBox(height: 16),
           _statusCard(),
+          const SizedBox(height: 8),
+          _debugPanel(),
           const SizedBox(height: 20),
           if (ble.connected.value) ...[
             _coverCard(),
@@ -467,6 +483,28 @@ class ControlTab extends StatelessWidget {
         ],
       ),
   ]);
+
+  // Pannello diagnostico: mostra esattamente cosa succede nell'ultima lettura
+  // dello stato, così un fallimento non resta più invisibile.
+  Widget _debugPanel() => AnimatedBuilder(
+    animation: ble.debugInfo,
+    builder: (_, __) => GestureDetector(
+      onTap: () => ble.readState(),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(color: const Color(0xFF141420), borderRadius: BorderRadius.circular(8)),
+        child: Row(children: [
+          const Icon(Icons.bug_report_outlined, size: 14, color: Colors.white24),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+            ble.debugInfo.value.isEmpty ? "tocca per leggere lo stato ora" : ble.debugInfo.value,
+            style: const TextStyle(color: Colors.white38, fontSize: 10, fontFamily: 'monospace'))),
+          const Icon(Icons.refresh, size: 14, color: Colors.white24),
+        ]),
+      ),
+    ),
+  );
 
   Widget _statusCard() => AnimatedBuilder(
     animation: Listenable.merge([ble.status, ble.busy, ble.autoReconnecting, ble.connected, ble.phase, ble.stepInfo]),
