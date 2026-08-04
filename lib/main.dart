@@ -219,6 +219,12 @@ class BleManager {
           }
         }
       }
+      if (_stateChar == null) {
+        // La caratteristica di stato non è stata trovata: probabile cache GATT
+        // del telefono non aggiornata dopo un reflash del firmware.
+        status.value = "⚠️ Stato non affidabile — vai in Bluetooth di sistema, "
+            "dimentica 'WandererCover' e riconnetti dall'app";
+      }
       // Legge lo stato reale dalla caratteristica READ (garantito, non si perde)
       await Future.delayed(const Duration(milliseconds: 300));
       await readState();
