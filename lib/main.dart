@@ -100,9 +100,9 @@ class BleManager {
   }
 
   // Reset stato: allinea app E firmware a cover chiuso + luce spenta
-  Future<void> resetState() async {
+  Future<void> resetState({required bool coverIsOpen}) async {
     // Azzera SUBITO lo stato locale dell'app (feedback immediato)
-    coverOpen.value = false;
+    coverOpen.value = coverIsOpen;
     configIndex.value = 0;
     lastSelected.value = 0;
     coverPending.value = false;
@@ -113,9 +113,9 @@ class BleManager {
     _coverTimeout?.cancel();
     final p = await SharedPreferences.getInstance();
     await p.setInt(kPrefLastSel, 0);
-    status.value = "Stato riallineato: cover chiuso, luce spenta";
-    // Invia anche al firmware
-    await send("RESET_STATE");
+    status.value = "Stato riallineato: cover ${coverIsOpen ? 'aperto' : 'chiuso'}, luce spenta";
+    // Invia al firmware lo stato reale, non un'assunzione
+    await send(coverIsOpen ? "RESET_STATE:open" : "RESET_STATE:closed");
   }
 
   // Toggle cover con feedback pending + timeout di sicurezza
@@ -437,7 +437,7 @@ class ControlTab extends StatelessWidget {
             const SizedBox(height: 20),
             _configSection(),
             const SizedBox(height: 20),
-            _resetButton(),
+            _resetButton(context),
             const SizedBox(height: 12),
             Center(child: TextButton.icon(
               onPressed: ble.disconnect,
@@ -655,18 +655,39 @@ class ControlTab extends StatelessWidget {
     },
   );
 
-  Widget _resetButton() => AnimatedBuilder(
+  Widget _resetButton(BuildContext context) => AnimatedBuilder(
     animation: ble.busy,
     builder: (_, __) => OutlinedButton.icon(
-      onPressed: ble.busy.value ? null : () => ble.resetState(),
+      onPressed: ble.busy.value ? null : () => _askAndReset(context),
       icon: const Icon(Icons.restart_alt, size: 18),
-      label: const Text("Reset stato (cover chiuso, luce spenta)"),
+      label: const Text("Reset stato — allinea alla realtà"),
       style: OutlinedButton.styleFrom(
         foregroundColor: Colors.white54, side: const BorderSide(color: Colors.white24),
         minimumSize: const Size(double.infinity, 46),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
     ),
   );
+
+  // Chiede lo stato FISICO reale prima di resettare: l'ESP32 non ha un
+  // sensore di posizione, quindi il reset deve sapere la verità da te,
+  // non assumerla — altrimenti resta sfasato rispetto al cover vero.
+  Future<void> _askAndReset(BuildContext context) async {
+    final isOpen = await showDialog<bool>(context: context, builder: (_) => AlertDialog(
+      backgroundColor: const Color(0xFF1A1A2E),
+      title: const Text("Stato reale del cover", style: TextStyle(color: Colors.white)),
+      content: const Text(
+        "L'ESP32 non può vedere il cover: dimmi tu com'è messo ORA fisicamente, "
+        "così l'app e il firmware si allineano alla realtà (la luce verrà considerata spenta).",
+        style: TextStyle(color: Colors.white54)),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false),
+          child: const Text("È chiuso", style: TextStyle(color: Colors.white70))),
+        TextButton(onPressed: () => Navigator.pop(context, true),
+          child: const Text("È aperto", style: TextStyle(color: Color(0xFF7B68EE)))),
+      ],
+    ));
+    if (isOpen != null) await ble.resetState(coverIsOpen: isOpen);
+  }
 
   Widget _connectSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
     const SizedBox(height: 20),
