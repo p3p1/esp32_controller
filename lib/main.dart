@@ -334,6 +334,10 @@ class BleManager {
         busy.value = parts[2] != "1";
         coverPending.value = false;
         debugInfo.value = "[$ts] letto OK: \"$s\" → cover=${coverOpen.value}, config=$cfg";
+        // La label principale riflette sempre lo stato reale appena letto,
+        // non resta ferma su un vecchio messaggio (es. quello del reset)
+        final cfgName = cfg == 0 ? "Spento" : kConfigs[cfg].name;
+        status.value = "${coverOpen.value ? 'Cover aperto' : 'Cover chiuso'} · $cfgName";
       } else {
         debugInfo.value = "[$ts] letto ma formato inatteso: \"$s\"";
       }
